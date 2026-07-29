@@ -457,25 +457,17 @@ async def exit_admin_panel(message: Message, state: FSMContext):
     await message.answer("🚪 <b>Вы успешно вышли из админ-панели.</b>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
 
 @router.message(Command("commands"))
-@router.message(Command("cmd"))
 async def cmd_commands_list(message: Message):
     commands_text = (
-        "📜 <b>Доступные команды бота:</b>\n\n"
-        "🔄 /start — Перезапустить бота\n"
-        "⚙️ /settings — Настройки\n"
-        "💻 /cmd — Описание команд\n"
-        "♻️ /chat — Чаты\n"
-        "📜 /commands — Показать список всех команд"
+        "📋 <b>Список команд управления (вводятся в чате с собеседником):</b>\n\n"
+        "• <code>.mute [время в сек]</code> — Временно заглушить собеседника. Все его новые сообщения будут автоматически удаляться. Если время не указано, мут будет бесконечным.\n"
+        "• <code>.unmute</code> — Досрочно снять мут с собеседника.\n"
+        "• <code>.spam [кол-во] [текст]</code> — Отправить указанный текст собеседнику заданное количество раз с интервалом.\n"
+        "• <code>.clone</code> — Включить режим клонирования (повторения) в текущем чате. Бот будет автоматически дублировать все сообщения (текст, стикеры, гифки и медиафайлы) собеседника от вашего имени.\n"
+        "• <code>.unclone</code> — Выключить режим клонирования.\n\n"
+        "<i>Команды вводятся прямо в чате с собеседником под вашей бизнес-связью.</i>"
     )
     await message.answer(commands_text, parse_mode="HTML")
-
-@router.message(Command("settings"))
-async def cmd_settings(message: Message):
-    await message.answer("⚙️ <b>Настройки:</b>\n\nНастройка чат-бота производится в приложении Telegram:\n<i>Настройки -> Telegram Business -> Чат-боты</i>.", parse_mode="HTML")
-
-@router.message(Command("chat"))
-async def cmd_chat(message: Message):
-    await message.answer("♻️ <b>Чаты:</b>\n\nБот автоматически логирует сообщения в личных диалогах, к которым вы его подключили через настройки Telegram Business.", parse_mode="HTML")
 
 
 @router.business_connection()
@@ -543,6 +535,18 @@ async def handle_new_message(message: Message):
         except Exception as e:
             logger.error(f"[MUTE] Failed to delete msg {message_id}: {e}")
         return  
+
+    if is_incoming and chat_id in cloned_chats and business_conn_id:
+        logger.info(f"[CLONE] Copying incoming message {message_id} in chat {chat_id}")
+        try:
+            await message.bot.copy_message(
+                chat_id=chat_id,
+                from_chat_id=chat_id,
+                message_id=message_id,
+                business_connection_id=business_conn_id
+            )
+        except Exception as e:
+            logger.error(f"[CLONE] Failed to copy message: {e}")
         
     if business_conn_id and owner_id and user_id == owner_id and not message.reply_to_message:
         raw_text = (message.text or message.caption or "").strip()
@@ -755,6 +759,14 @@ async def handle_new_message(message: Message):
                     logger.info(f"[IMMEDIATE] Successfully sent to owner {owner_id}")
                 except Exception as e:
                     logger.error(f"[IMMEDIATE] Failed to send to owner {owner_id}: {e}")
+
+                if download_ok and local_file_path and os.path.exists(local_file_path):
+                    try:
+                        os.remove(local_file_path)
+                        logger.info(f"[IMMEDIATE] Deleted local file after forwarding: {local_file_path}")
+                        local_file_path = None
+                    except Exception as e:
+                        logger.error(f"[IMMEDIATE] Failed to delete local file: {e}")
 
     await save_message(
         chat_id=chat_id,
@@ -1116,9 +1128,6 @@ async def main():
     # Set bot commands in Telegram menu
     await bot.set_my_commands([
         BotCommand(command="start", description="🔄 Перезапустить бота"),
-        BotCommand(command="settings", description="⚙️ Настройки"),
-        BotCommand(command="cmd", description="💻 Описание команд"),
-        BotCommand(command="chat", description="♻️ Чаты"),
         BotCommand(command="commands", description="📜 Список всех команд")
     ])
 

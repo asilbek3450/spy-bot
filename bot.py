@@ -582,7 +582,7 @@ async def handle_new_message(message: Message):
     if business_conn_id and message.reply_to_message and owner_id and user_id == owner_id:
         replied_msg = message.reply_to_message
         
-        до
+        
         replied_media_type, replied_file_id, replied_text = get_media_info(replied_msg)
         
         if replied_file_id and replied_media_type:

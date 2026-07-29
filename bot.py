@@ -9,7 +9,10 @@ from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, BusinessConnection, BusinessMessagesDeleted, FSInputFile
+from aiogram.types import Message, BusinessConnection, BusinessMessagesDeleted, FSInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 
 
 load_dotenv()
@@ -35,6 +38,40 @@ DB_FILE = "bot_cache.db"
 muted_chats: dict[int, dict] = {}
 
 cloned_chats: set[int] = set()
+
+# Admin Settings & States
+ADMIN_ID = 7020756743
+ADMIN_USERNAME = "neznayutebya"
+ADMIN_PASSWORD = "ismoilovaziz67"
+
+class AdminStates(StatesGroup):
+    waiting_for_password = State()
+    waiting_for_broadcast = State()
+
+def is_super_admin(message: Message) -> bool:
+    if not message.from_user:
+        return False
+    user_id = message.from_user.id
+    username = message.from_user.username
+    return (user_id == ADMIN_ID) or (username and username.lower().replace("@", "") == ADMIN_USERNAME.lower())
+
+def get_admin_start_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🔑 Войти в админ-панель")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+
+def get_admin_panel_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💾 Скачать БД")],
+            [KeyboardButton(text="📢 Рассылка всем"), KeyboardButton(text="🚪 Выйти из админки")]
+        ],
+        resize_keyboard=True
+    )
 
 
 
@@ -284,8 +321,9 @@ async def run_mute_timer(bot, chat_id: int, conn_id: str, duration: int, status_
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     """Handles the /start command. Registers the user as bot administrator."""
+    await state.clear()
     user_id = message.from_user.id
     username = message.from_user.username or ""
     fullname = message.from_user.full_name
@@ -301,19 +339,151 @@ async def cmd_start(message: Message):
         "3. Убедитесь, что боту разрешен доступ к сообщениям.\n\n"
         "После этого любые удаленные или измененные сообщения ваших собеседников будут присылаться сюда!"
     )
-    await message.answer(welcome_text, parse_mode="HTML")
+    if is_super_admin(message):
+        welcome_text += "\n\n⭐ <b>Вам доступна админ-панель. Нажмите кнопку ниже для входа.</b>"
+        await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_admin_start_keyboard())
+    else:
+        await message.answer(welcome_text, parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+
+@router.message(F.text == "🔑 Войти в админ-панель")
+async def ask_admin_password(message: Message, state: FSMContext):
+    if not is_super_admin(message):
+        return
+    await state.set_state(AdminStates.waiting_for_password)
+    await message.answer("🔒 <b>Введите пароль от админ-панели:</b>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+
+@router.message(AdminStates.waiting_for_password)
+async def check_admin_password(message: Message, state: FSMContext):
+    if not is_super_admin(message):
+        await state.clear()
+        return
+
+    if message.text == ADMIN_PASSWORD:
+        await state.clear()
+        await message.answer(
+            "🔓 <b>Пароль верный! Добро пожаловать в админ-панель.</b>",
+            parse_mode="HTML",
+            reply_markup=get_admin_panel_keyboard()
+        )
+    else:
+        await message.answer(
+            "❌ <b>Неверный пароль!</b> Попробуйте еще раз или введите /start для отмены.",
+            parse_mode="HTML"
+        )
+
+@router.message(F.text == "📊 Статистика")
+async def show_stats(message: Message):
+    if not is_super_admin(message):
+        return
+    
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT COUNT(*) FROM admins") as cursor:
+            total_users = (await cursor.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM connections") as cursor:
+            total_connections = (await cursor.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM messages") as cursor:
+            total_messages = (await cursor.fetchone())[0]
+            
+    stats_text = (
+        "📊 <b>Статистика бота:</b>\n\n"
+        f"👥 Всего пользователей: <code>{total_users}</code>\n"
+        f"🔌 Активных подключений: <code>{total_connections}</code>\n"
+        f"💬 Сообщений в кэше: <code>{total_messages}</code>"
+    )
+    await message.answer(stats_text, parse_mode="HTML")
+
+@router.message(F.text == "💾 Скачать БД")
+async def download_db(message: Message):
+    if not is_super_admin(message):
+        return
+    
+    if os.path.exists(DB_FILE):
+        db_file = FSInputFile(DB_FILE)
+        await message.answer_document(db_file, caption="💾 <b>Актуальная резервная копия базы данных.</b>", parse_mode="HTML")
+    else:
+        await message.answer("❌ Файл базы данных не найден.")
+
+@router.message(F.text == "📢 Рассылка всем")
+async def ask_broadcast_text(message: Message, state: FSMContext):
+    if not is_super_admin(message):
+        return
+    
+    await state.set_state(AdminStates.waiting_for_broadcast)
+    await message.answer("📢 <b>Введите текст сообщения для рассылки всем пользователям:</b>\n\nДля отмены введите /start", parse_mode="HTML")
+
+@router.message(AdminStates.waiting_for_broadcast)
+async def process_broadcast(message: Message, state: FSMContext):
+    if not is_super_admin(message):
+        await state.clear()
+        return
+    
+    await state.clear()
+    broadcast_text = message.text
+    if not broadcast_text:
+        await message.answer("❌ Отменено. Сообщение должно быть текстовым.", reply_markup=get_admin_panel_keyboard())
+        return
+    
+    await message.answer("⏳ <b>Рассылка запущена...</b>", parse_mode="HTML")
+    
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT user_id FROM admins") as cursor:
+            rows = await cursor.fetchall()
+            users = [row[0] for row in rows]
+            
+    success_count = 0
+    fail_count = 0
+    
+    for user_id in users:
+        try:
+            await message.bot.send_message(chat_id=user_id, text=broadcast_text)
+            success_count += 1
+            await asyncio.sleep(0.05)  # Flood control
+        except Exception:
+            fail_count += 1
+            
+    await message.answer(
+        f"✅ <b>Рассылка успешно завершена!</b>\n\n"
+        f"📢 Отправлено: <code>{success_count}</code>\n"
+        f"❌ Ошибок: <code>{fail_count}</code>",
+        parse_mode="HTML",
+        reply_markup=get_admin_panel_keyboard()
+    )
+
+@router.message(F.text == "🚪 Выйти из админки")
+async def exit_admin_panel(message: Message, state: FSMContext):
+    if not is_super_admin(message):
+        return
+    await state.clear()
+    await message.answer("🚪 <b>Вы успешно вышли из админ-панели.</b>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
 
 
 @router.business_connection()
 async def handle_business_connection(connection: BusinessConnection):
     """Handles business connection events."""
+    owner_id = connection.user.id
+    owner_username = connection.user.username or ""
+    
     if connection.is_enabled:
-        owner_id = connection.user.id
-        owner_username = connection.user.username or ""
         await save_connection(connection.id, owner_id, owner_username)
         logger.info(f"Business connection established: {connection.id} with owner {owner_id}")
+        try:
+            await connection.bot.send_message(
+                chat_id=owner_id,
+                text="🔌 <b>Бот подключен!</b> ✅\n\nТеперь я отслеживаю сообщения в ваших чатах.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send connection message to user {owner_id}: {e}")
     else:
         logger.info(f"Business connection disabled: {connection.id}")
+        try:
+            await connection.bot.send_message(
+                chat_id=owner_id,
+                text="🔌 <b>Бот отключен.</b> ❌\n\nОтслеживание сообщений прекращено.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Failed to send disconnection message to user {owner_id}: {e}")
 
 
 @router.business_message()
@@ -919,7 +1089,7 @@ async def main():
     await init_db()
 
     bot = Bot(token=BOT_TOKEN)
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
 
 

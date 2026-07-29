@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, BusinessConnection, BusinessMessagesDeleted, FSInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand
+from aiogram.types import Message, BusinessConnection, BusinessMessagesDeleted, FSInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -67,11 +67,25 @@ def get_admin_start_keyboard():
 def get_admin_panel_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="💾 Скачать БД"), KeyboardButton(text="📢 Рассылка всем")],
-            [KeyboardButton(text="🚪 Выйти из админки")]
+            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💾 Скачать БД")],
+            [KeyboardButton(text="📢 Рассылка всем"), KeyboardButton(text="🚪 Выйти из админки")]
         ],
         resize_keyboard=True
+    )
+
+def get_commands_inline_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=".spam", callback_data="cmd_help_spam")],
+            [InlineKeyboardButton(text=".mute / .unmute", callback_data="cmd_help_mute")]
+        ]
+    )
+
+def get_back_inline_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="cmd_help_back")]
+        ]
     )
 
 
@@ -282,8 +296,17 @@ def parse_owner_command(text: str):
     if cmd == ".mute":
         duration = 0
         if len(parts) >= 2:
+            val = parts[1].strip().lower()
             try:
-                duration = max(0, int(parts[1]))
+                if val.endswith("s"):
+                    duration = int(val[:-1])
+                elif val.endswith("m"):
+                    duration = int(val[:-1]) * 60
+                elif val.endswith("h"):
+                    duration = int(val[:-1]) * 3600
+                else:
+                    duration = int(val)
+                duration = max(0, duration)
             except ValueError:
                 pass
         return "mute", duration, None
@@ -361,8 +384,24 @@ async def check_admin_password(message: Message, state: FSMContext):
 
     if message.text == ADMIN_PASSWORD:
         await state.clear()
+        
+        async with aiosqlite.connect(DB_FILE) as db:
+            async with db.execute("SELECT COUNT(*) FROM admins") as cursor:
+                total_users = (await cursor.fetchone())[0]
+            async with db.execute("SELECT user_id, username, fullname FROM admins ORDER BY user_id DESC LIMIT 10") as cursor:
+                rows = await cursor.fetchall()
+                
+        admin_text = (
+            "🔓 <b>Пароль верный! Добро пожаловать в админ-панель.</b>\n\n"
+            f"👥 <b>Всего пользователей:</b> <code>{total_users}</code>\n\n"
+            "📅 <b>Последние пользователи (краткий список):</b>\n"
+        )
+        for i, (uid, uname, fname) in enumerate(rows, start=1):
+            uname_str = f" (@{uname})" if uname else ""
+            admin_text += f"{i}. ID: <code>{uid}</code> | {fname}{uname_str}\n"
+            
         await message.answer(
-            "🔓 <b>Пароль верный! Добро пожаловать в админ-панель.</b>",
+            admin_text,
             parse_mode="HTML",
             reply_markup=get_admin_panel_keyboard()
         )
@@ -384,13 +423,20 @@ async def show_stats(message: Message):
             total_connections = (await cursor.fetchone())[0]
         async with db.execute("SELECT COUNT(*) FROM messages") as cursor:
             total_messages = (await cursor.fetchone())[0]
+        async with db.execute("SELECT user_id, username, fullname FROM admins ORDER BY user_id DESC LIMIT 10") as cursor:
+            latest_rows = await cursor.fetchall()
             
     stats_text = (
         "📊 <b>Статистика бота:</b>\n\n"
         f"👥 Всего пользователей: <code>{total_users}</code>\n"
         f"🔌 Активных подключений: <code>{total_connections}</code>\n"
-        f"💬 Сообщений в кэше: <code>{total_messages}</code>"
+        f"💬 Сообщений в кэше: <code>{total_messages}</code>\n\n"
+        "📅 <b>Последние пользователи (краткий список):</b>\n"
     )
+    for i, (uid, uname, fname) in enumerate(latest_rows, start=1):
+        uname_str = f" (@{uname})" if uname else ""
+        stats_text += f"{i}. ID: <code>{uid}</code> | {fname}{uname_str}\n"
+
     await message.answer(stats_text, parse_mode="HTML")
 
 @router.message(F.text == "💾 Скачать БД")
@@ -458,17 +504,60 @@ async def exit_admin_panel(message: Message, state: FSMContext):
     await message.answer("🚪 <b>Вы успешно вышли из админ-панели.</b>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
 
 @router.message(Command("commands"))
+@router.message(Command("cmd"))
 async def cmd_commands_list(message: Message):
-    commands_text = (
-        "📋 <b>Список команд управления (вводятся в чате с собеседником):</b>\n\n"
-        "• <code>.mute [время в сек]</code> — Временно заглушить собеседника. Все его новые сообщения будут автоматически удаляться. Если время не указано, мут будет бесконечным.\n"
-        "• <code>.unmute</code> — Досрочно снять мут с собеседника.\n"
-        "• <code>.spam [кол-во] [текст]</code> — Отправить указанный текст собеседнику заданное количество раз с интервалом.\n"
-        "• <code>.clone</code> — Включить режим клонирования (повторения) в текущем чате. Бот будет автоматически дублировать все сообщения (текст, стикеры, гифки и медиафайлы) собеседника от вашего имени.\n"
-        "• <code>.unclone</code> — Выключить режим клонирования.\n\n"
-        "<i>Команды вводятся прямо в чате с собеседником под вашей бизнес-связью.</i>"
+    commands_welcome = (
+        "💻 <b>Описание команд</b>\n\n"
+        "Список команд, доступных в чате с собеседником.\n"
+        "<b>Выберите команду ниже, чтобы ознакомиться с её функционалом.</b>"
     )
-    await message.answer(commands_text, parse_mode="HTML")
+    await message.answer(commands_welcome, parse_mode="HTML", reply_markup=get_commands_inline_keyboard())
+
+@router.callback_query(F.data == "cmd_help_spam")
+async def process_help_spam(callback: CallbackQuery):
+    spam_text = (
+        "<b>Команда:</b> <code>.spam</code>\n\n"
+        "Спам в чате с собеседником\n\n"
+        "<b>Использование:</b>\n"
+        "<code>.spam [кол-во] [текст]</code>\n\n"
+        "<b>Пример:</b>\n"
+        "<code>.spam 5 Привет</code>"
+    )
+    await callback.message.edit_text(spam_text, parse_mode="HTML", reply_markup=get_back_inline_keyboard())
+    await callback.answer()
+
+@router.callback_query(F.data == "cmd_help_mute")
+async def process_help_mute(callback: CallbackQuery):
+    mute_text = (
+        "<b>Команды:</b> <code>.mute</code>\n\n"
+        "После команды <code>.mute</code> все сообщения собеседника будут автоматически удаляться.\n"
+        "После <code>.unmute</code> сообщения перестанут удаляться.\n\n"
+        "1. <code>.mute 30s</code> — мутит на 30 секунд\n"
+        "2. <code>.mute 5m</code> — мутит на 5 минут\n"
+        "3. <code>.mute 2h</code> — мутит на 2 часа\n"
+        "4. <code>.mute</code> — мутит навсегда\n"
+        "5. <code>.unmute</code> — снимает мут досрочно\n\n"
+        "<b>Использование:</b>\n"
+        "<code>.mute [число][s/m/h]</code> — на время\n"
+        "<code>.mute</code> — навсегда\n\n"
+        "<b>Примеры:</b>\n"
+        "<code>.mute 30s</code> — на 30 секунд\n"
+        "<code>.mute 10m</code> — на 10 минут\n"
+        "<code>.mute 2h</code> — на 2 часа\n"
+        "<code>.mute</code> — навсегда"
+    )
+    await callback.message.edit_text(mute_text, parse_mode="HTML", reply_markup=get_back_inline_keyboard())
+    await callback.answer()
+
+@router.callback_query(F.data == "cmd_help_back")
+async def process_help_back(callback: CallbackQuery):
+    commands_welcome = (
+        "💻 <b>Описание команд</b>\n\n"
+        "Список команд, доступных в чате с собеседником.\n"
+        "<b>Выберите команду ниже, чтобы ознакомиться с её функционалом.</b>"
+    )
+    await callback.message.edit_text(commands_welcome, parse_mode="HTML", reply_markup=get_commands_inline_keyboard())
+    await callback.answer()
 
 @router.message(Command("admin"))
 async def cmd_admin(message: Message, state: FSMContext):
@@ -476,30 +565,6 @@ async def cmd_admin(message: Message, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_for_password)
     await message.answer("🔒 <b>Введите пароль от админ-панели:</b>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
-
-@router.message(F.text == "👥 Пользователи")
-async def show_users(message: Message):
-    if not is_super_admin(message):
-        return
-    
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT user_id, username, fullname FROM admins") as cursor:
-            rows = await cursor.fetchall()
-            
-    if not rows:
-        await message.answer("👥 Пользователей пока нет.")
-        return
-        
-    text = "👥 <b>Список зарегистрированных пользователей:</b>\n\n"
-    for i, (uid, uname, fname) in enumerate(rows, start=1):
-        uname_str = f" (@{uname})" if uname else ""
-        text += f"{i}. ID: <code>{uid}</code> | {fname}{uname_str}\n"
-        if len(text) > 3500:
-            await message.answer(text, parse_mode="HTML")
-            text = ""
-            
-    if text:
-        await message.answer(text, parse_mode="HTML")
 
 
 @router.business_connection()
@@ -514,7 +579,13 @@ async def handle_business_connection(connection: BusinessConnection):
         try:
             await connection.bot.send_message(
                 chat_id=owner_id,
-                text="🔌 <b>Бот подключен!</b> ✅\n\nТеперь я отслеживаю сообщения в ваших чатах.",
+                text=(
+                    "✅ <b>Бот успешно привязан</b>\n\n"
+                    "<b>Как использовать?</b>\n"
+                    "➖ Если ваш собеседник удалит сообщение, бот сразу же пришлёт вам копию (работает только с сообщениями, отправленными ПОСЛЕ подключения бота)\n"
+                    "➖ Чтобы скачивать фото/видео, голосовые и видеосообщения с таймером, ответьте на них в диалоге с собеседником любым сообщением (ДО ОТКРЫТИЯ, ЭТО ВАЖНО!)\n\n"
+                    "❗️ <b>Бот работает только с НОВЫМИ сообщениями, полученными после подключения бота</b>"
+                ),
                 parse_mode="HTML"
             )
         except Exception as e:

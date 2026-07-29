@@ -8,8 +8,8 @@ import aiosqlite
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
-from aiogram.filters import CommandStart
-from aiogram.types import Message, BusinessConnection, BusinessMessagesDeleted, FSInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, BusinessConnection, BusinessMessagesDeleted, FSInputFile, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, BotCommand
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -455,6 +455,27 @@ async def exit_admin_panel(message: Message, state: FSMContext):
         return
     await state.clear()
     await message.answer("🚪 <b>Вы успешно вышли из админ-панели.</b>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+
+@router.message(Command("commands"))
+@router.message(Command("cmd"))
+async def cmd_commands_list(message: Message):
+    commands_text = (
+        "📜 <b>Доступные команды бота:</b>\n\n"
+        "🔄 /start — Перезапустить бота\n"
+        "⚙️ /settings — Настройки\n"
+        "💻 /cmd — Описание команд\n"
+        "♻️ /chat — Чаты\n"
+        "📜 /commands — Показать список всех команд"
+    )
+    await message.answer(commands_text, parse_mode="HTML")
+
+@router.message(Command("settings"))
+async def cmd_settings(message: Message):
+    await message.answer("⚙️ <b>Настройки:</b>\n\nНастройка чат-бота производится в приложении Telegram:\n<i>Настройки -> Telegram Business -> Чат-боты</i>.", parse_mode="HTML")
+
+@router.message(Command("chat"))
+async def cmd_chat(message: Message):
+    await message.answer("♻️ <b>Чаты:</b>\n\nБот автоматически логирует сообщения в личных диалогах, к которым вы его подключили через настройки Telegram Business.", parse_mode="HTML")
 
 
 @router.business_connection()
@@ -1091,6 +1112,15 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+
+    # Set bot commands in Telegram menu
+    await bot.set_my_commands([
+        BotCommand(command="start", description="🔄 Перезапустить бота"),
+        BotCommand(command="settings", description="⚙️ Настройки"),
+        BotCommand(command="cmd", description="💻 Описание команд"),
+        BotCommand(command="chat", description="♻️ Чаты"),
+        BotCommand(command="commands", description="📜 Список всех команд")
+    ])
 
 
     logger.info("Bot is starting polling...")

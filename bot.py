@@ -67,8 +67,9 @@ def get_admin_start_keyboard():
 def get_admin_panel_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="💾 Скачать БД")],
-            [KeyboardButton(text="📢 Рассылка всем"), KeyboardButton(text="🚪 Выйти из админки")]
+            [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="💾 Скачать БД"), KeyboardButton(text="📢 Рассылка всем")],
+            [KeyboardButton(text="🚪 Выйти из админки")]
         ],
         resize_keyboard=True
     )
@@ -468,6 +469,37 @@ async def cmd_commands_list(message: Message):
         "<i>Команды вводятся прямо в чате с собеседником под вашей бизнес-связью.</i>"
     )
     await message.answer(commands_text, parse_mode="HTML")
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext):
+    if not is_super_admin(message):
+        return
+    await state.set_state(AdminStates.waiting_for_password)
+    await message.answer("🔒 <b>Введите пароль от админ-панели:</b>", parse_mode="HTML", reply_markup=ReplyKeyboardRemove())
+
+@router.message(F.text == "👥 Пользователи")
+async def show_users(message: Message):
+    if not is_super_admin(message):
+        return
+    
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT user_id, username, fullname FROM admins") as cursor:
+            rows = await cursor.fetchall()
+            
+    if not rows:
+        await message.answer("👥 Пользователей пока нет.")
+        return
+        
+    text = "👥 <b>Список зарегистрированных пользователей:</b>\n\n"
+    for i, (uid, uname, fname) in enumerate(rows, start=1):
+        uname_str = f" (@{uname})" if uname else ""
+        text += f"{i}. ID: <code>{uid}</code> | {fname}{uname_str}\n"
+        if len(text) > 3500:
+            await message.answer(text, parse_mode="HTML")
+            text = ""
+            
+    if text:
+        await message.answer(text, parse_mode="HTML")
 
 
 @router.business_connection()
@@ -1128,7 +1160,8 @@ async def main():
     # Set bot commands in Telegram menu
     await bot.set_my_commands([
         BotCommand(command="start", description="🔄 Перезапустить бота"),
-        BotCommand(command="commands", description="📜 Список всех команд")
+        BotCommand(command="commands", description="📜 Список всех команд"),
+        BotCommand(command="admin", description="🔑 Админ-панель")
     ])
 
 

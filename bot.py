@@ -40,9 +40,9 @@ muted_chats: dict[int, dict] = {}
 cloned_chats: set[int] = set()
 
 # Admin Settings & States
-ADMIN_ID = 7020756743
-ADMIN_USERNAME = "neznayutebya"
-ADMIN_PASSWORD = "ismoilovaziz67"
+ADMIN_ID = 8459165995
+ADMIN_USERNAME = "mbek23"
+ADMIN_PASSWORD = "asilbek"
 
 class AdminStates(StatesGroup):
     waiting_for_password = State()

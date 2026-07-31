@@ -1,4 +1,4 @@
 .env
-
 downloads
 /downloads
+*.db

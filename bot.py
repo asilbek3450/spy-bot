@@ -3,8 +3,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
-import sqlite3
-import aiosqlite
+import asyncpg
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, Router, F
@@ -33,7 +32,11 @@ logger = logging.getLogger(__name__)
 
 
 router = Router()
-DB_FILE = "bot_cache.db"
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL is not defined in the environment variables.")
+
+DB_POOL = None
 
 muted_chats: dict[int, dict] = {}
 
@@ -91,88 +94,87 @@ def get_back_inline_keyboard():
 
 
 async def init_db():
-    """Initializes the SQLite database schema."""
-    async with aiosqlite.connect(DB_FILE) as db:
-
-        await db.execute("""
+    """Initializes the PostgreSQL database schema and connection pool."""
+    global DB_POOL
+    DB_POOL = await asyncpg.create_pool(DATABASE_URL)
+    
+    async with DB_POOL.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
-                chat_id INTEGER,
-                message_id INTEGER,
-                user_id INTEGER,
+                chat_id BIGINT,
+                message_id BIGINT,
+                user_id BIGINT,
                 fullname TEXT,
                 username TEXT,
                 text TEXT,
                 media_type TEXT,
                 file_id TEXT,
-                date INTEGER,
+                date BIGINT,
                 business_connection_id TEXT,
                 local_file_path TEXT,
                 PRIMARY KEY (chat_id, message_id)
             )
         """)
 
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS connections (
                 connection_id TEXT PRIMARY KEY,
-                owner_id INTEGER,
+                owner_id BIGINT,
                 owner_username TEXT
             )
         """)
   
-        await db.execute("""
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS admins (
-                user_id INTEGER PRIMARY KEY,
+                user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 fullname TEXT
             )
         """)
-        await db.commit()
-
-       
-        async with db.execute("PRAGMA table_info(messages)") as cursor:
-            columns = await cursor.fetchall()
-            column_names = [col[1] for col in columns]
-            if "local_file_path" not in column_names:
-                await db.execute("ALTER TABLE messages ADD COLUMN local_file_path TEXT")
-                await db.commit()
 
     logger.info("Database initialized successfully.")
 
 async def save_admin(user_id: int, username: str, fullname: str):
     """Saves an admin (user who started the bot)."""
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO admins (user_id, username, fullname) VALUES (?, ?, ?)",
-            (user_id, username, fullname)
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO admins (user_id, username, fullname) 
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id) DO UPDATE 
+            SET username = EXCLUDED.username, fullname = EXCLUDED.fullname
+            """,
+            user_id, username, fullname
         )
-        await db.commit()
 
 async def get_admins():
     """Retrieves all registered admins."""
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT user_id FROM admins") as cursor:
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+    async with DB_POOL.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM admins")
+        return [row[0] for row in rows]
 
 async def save_connection(connection_id: str, owner_id: int, owner_username: str):
     """Saves or updates a business connection mapping."""
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO connections (connection_id, owner_id, owner_username) VALUES (?, ?, ?)",
-            (connection_id, owner_id, owner_username)
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO connections (connection_id, owner_id, owner_username) 
+            VALUES ($1, $2, $3)
+            ON CONFLICT (connection_id) DO UPDATE 
+            SET owner_id = EXCLUDED.owner_id, owner_username = EXCLUDED.owner_username
+            """,
+            connection_id, owner_id, owner_username
         )
-        await db.commit()
     logger.info(f"Saved connection {connection_id} for owner {owner_id} (@{owner_username})")
 
 async def get_owner_by_connection(connection_id: str):
     """Gets the owner's user_id for a given connection_id."""
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute(
-            "SELECT owner_id FROM connections WHERE connection_id = ?",
-            (connection_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else None
+    async with DB_POOL.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT owner_id FROM connections WHERE connection_id = $1",
+            connection_id
+        )
+        return row[0] if row else None
 
 async def save_message(
     chat_id: int,
@@ -188,36 +190,43 @@ async def save_message(
     local_file_path: str = None
 ):
     """Saves a message to the database cache."""
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute(
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
             """
-            INSERT OR REPLACE INTO messages 
+            INSERT INTO messages 
             (chat_id, message_id, user_id, fullname, username, text, media_type, file_id, date, business_connection_id, local_file_path) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            ON CONFLICT (chat_id, message_id) DO UPDATE 
+            SET user_id = EXCLUDED.user_id,
+                fullname = EXCLUDED.fullname,
+                username = EXCLUDED.username,
+                text = EXCLUDED.text,
+                media_type = EXCLUDED.media_type,
+                file_id = EXCLUDED.file_id,
+                date = EXCLUDED.date,
+                business_connection_id = EXCLUDED.business_connection_id,
+                local_file_path = EXCLUDED.local_file_path
             """,
-            (chat_id, message_id, user_id, fullname, username, text, media_type, file_id, date, business_connection_id, local_file_path)
+            chat_id, message_id, user_id, fullname, username, text, media_type, file_id, date, business_connection_id, local_file_path
         )
-        await db.commit()
 
 async def update_message_local_path(chat_id: int, message_id: int, local_file_path: str):
     """Updates the local file path of a cached message."""
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute(
-            "UPDATE messages SET local_file_path = ? WHERE chat_id = ? AND message_id = ?",
-            (local_file_path, chat_id, message_id)
+    async with DB_POOL.acquire() as conn:
+        await conn.execute(
+            "UPDATE messages SET local_file_path = $1 WHERE chat_id = $2 AND message_id = $3",
+            local_file_path, chat_id, message_id
         )
-        await db.commit()
 
 async def get_message(chat_id: int, message_id: int):
     """Gets a cached message from the database."""
-    async with aiosqlite.connect(DB_FILE) as db:
-        db.row_factory = sqlite3.Row
-        async with db.execute(
-            "SELECT * FROM messages WHERE chat_id = ? AND message_id = ?",
-            (chat_id, message_id)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return dict(row) if row else None
+    async with DB_POOL.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM messages WHERE chat_id = $1 AND message_id = $2",
+            chat_id, message_id
+        )
+        return dict(row) if row else None
+
 
 
 
@@ -385,11 +394,9 @@ async def check_admin_password(message: Message, state: FSMContext):
     if message.text == ADMIN_PASSWORD:
         await state.clear()
         
-        async with aiosqlite.connect(DB_FILE) as db:
-            async with db.execute("SELECT COUNT(*) FROM admins") as cursor:
-                total_users = (await cursor.fetchone())[0]
-            async with db.execute("SELECT user_id, username, fullname FROM admins ORDER BY user_id DESC LIMIT 10") as cursor:
-                rows = await cursor.fetchall()
+        async with DB_POOL.acquire() as conn:
+            total_users = await conn.fetchval("SELECT COUNT(*) FROM admins")
+            rows = await conn.fetch("SELECT user_id, username, fullname FROM admins ORDER BY user_id DESC LIMIT 10")
                 
         admin_text = (
             "🔓 <b>Пароль верный! Добро пожаловать в админ-панель.</b>\n\n"
@@ -416,15 +423,11 @@ async def show_stats(message: Message):
     if not is_super_admin(message):
         return
     
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT COUNT(*) FROM admins") as cursor:
-            total_users = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM connections") as cursor:
-            total_connections = (await cursor.fetchone())[0]
-        async with db.execute("SELECT COUNT(*) FROM messages") as cursor:
-            total_messages = (await cursor.fetchone())[0]
-        async with db.execute("SELECT user_id, username, fullname FROM admins ORDER BY user_id DESC LIMIT 10") as cursor:
-            latest_rows = await cursor.fetchall()
+    async with DB_POOL.acquire() as conn:
+        total_users = await conn.fetchval("SELECT COUNT(*) FROM admins")
+        total_connections = await conn.fetchval("SELECT COUNT(*) FROM connections")
+        total_messages = await conn.fetchval("SELECT COUNT(*) FROM messages")
+        latest_rows = await conn.fetch("SELECT user_id, username, fullname FROM admins ORDER BY user_id DESC LIMIT 10")
             
     stats_text = (
         "📊 <b>Статистика бота:</b>\n\n"
@@ -444,11 +447,36 @@ async def download_db(message: Message):
     if not is_super_admin(message):
         return
     
-    if os.path.exists(DB_FILE):
-        db_file = FSInputFile(DB_FILE)
-        await message.answer_document(db_file, caption="💾 <b>Актуальная резервная копия базы данных.</b>", parse_mode="HTML")
-    else:
-        await message.answer("❌ Файл базы данных не найден.")
+    try:
+        async with DB_POOL.acquire() as conn:
+            admins = await conn.fetch("SELECT * FROM admins")
+            connections = await conn.fetch("SELECT * FROM connections")
+            messages = await conn.fetch("SELECT * FROM messages")
+            
+        backup_data = {
+            "admins": [dict(r) for r in admins],
+            "connections": [dict(r) for r in connections],
+            "messages": [dict(r) for r in messages]
+        }
+        
+        import json
+        backup_filename = f"db_backup_{int(time.time())}.json"
+        
+        os.makedirs("downloads", exist_ok=True)
+        backup_filepath = os.path.join("downloads", backup_filename)
+        
+        with open(backup_filepath, "w", encoding="utf-8") as f:
+            json.dump(backup_data, f, ensure_ascii=False, indent=4, default=str)
+            
+        db_file = FSInputFile(backup_filepath)
+        await message.answer_document(
+            db_file, 
+            caption="💾 <b>Резервная копия базы данных (JSON формат).</b>", 
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Error creating database backup: {e}")
+        await message.answer(f"❌ Ошибка при создании резервной копии: {e}")
 
 @router.message(F.text == "📢 Рассылка всем")
 async def ask_broadcast_text(message: Message, state: FSMContext):
@@ -472,10 +500,9 @@ async def process_broadcast(message: Message, state: FSMContext):
     
     await message.answer("⏳ <b>Рассылка запущена...</b>", parse_mode="HTML")
     
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT user_id FROM admins") as cursor:
-            rows = await cursor.fetchall()
-            users = [row[0] for row in rows]
+    async with DB_POOL.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM admins")
+        users = [row[0] for row in rows]
             
     success_count = 0
     fail_count = 0
